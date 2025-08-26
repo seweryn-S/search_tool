@@ -1,0 +1,17 @@
+services:
+  searxng-tool:
+    build: .
+    environment:
+      - SEARXNG_URL=https://ai.p.lodz.pl/sx
+      - TIMEOUT_S=3.0
+      - MAX_CONN=200
+      - MAX_KEEP=100
+    ports:
+      - "7000:7000"
+    dns: ["1.1.1.1"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://172.22.1.5:7000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10

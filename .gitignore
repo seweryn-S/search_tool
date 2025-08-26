@@ -1,0 +1,52 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pkl
+*.log
+*.sqlite3
+
+# Virtualenv
+.venv/
+env/
+venv/
+ENV/
+
+# Jupyter / IPython
+.ipynb_checkpoints
+*.ipynb
+
+# --- Systemowe ---
+.DS_Store
+Thumbs.db
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- Testy ---
+.coverage
+.tox/
+.pytest_cache/
+
+# --- Docker ---
+/*.pid
+*.pid.lock
+*.seed
+*.bak
+
+# Build & dist
+build/
+dist/
+.eggs/
+*.egg-info/
+*.egg
+
+# --- FastAPI/Uvicorn ---
+*.db
+*.sqlite
+instance/
+
