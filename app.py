@@ -39,6 +39,7 @@ __version__ = "0.4.1"
 __author__ = "Seweryn Sitarski, Kat"
 __license__ = "MIT"
 __contact__ = "seweryn.sitarski@gmail.com"
+__url__ = "https://example.local/searxng-openapi-tool"
 
 app = FastAPI(
     title=__title__,
@@ -309,8 +310,9 @@ async def fetch_url(
         raise HTTPException(502, f"fetch upstream error: {e}") from e
 
     ctype = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+    is_html = ctype.startswith("text/html") or ctype == "application/xhtml+xml"
 
-    if not ctype.startswith("text/html"):
+    if not is_html:
         text = resp.text[:max_chars]
         if response is not None:
             response.headers["X-Tool-Name"] = __title__
@@ -375,4 +377,3 @@ async def fetch_url(
         content_type=ctype,
         source=chosen_source,
     )
-
