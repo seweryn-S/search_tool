@@ -374,7 +374,7 @@ async def _fetch_one(url: str, max_chars: int) -> FetchResult:
     try:
         resp = await client.get(url, headers=headers)
     except httpx.RequestError as e:
-        raise HTTPException(502, f"fetch upstream error: {e}") from e
+        raise HTTPException(502, f"fetch upstream error: {e!r}") from e
 
     ctype = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
     is_html = ctype.startswith("text/html") or ctype == "application/xhtml+xml"
@@ -423,7 +423,23 @@ async def _fetch_one(url: str, max_chars: int) -> FetchResult:
             chosen_md, chosen_meta, chosen_source = read_md, read_meta, "readability"
 
     if not chosen_md:
-        raise HTTPException(502, "content extraction failed")
+        # Robust fallbacks: try full-article readability, then markdownify whole HTML
+        html_fallback = html_bytes.decode("utf-8", errors="ignore")
+        try:
+            doc2 = Document(html_fallback)
+            full_html = doc2.summary()  # full article HTML
+            chosen_md = md(full_html or "", strip=["script", "style"]) or ""
+            chosen_source = "readability-fallback"
+        except Exception:
+            chosen_md = ""
+        if not chosen_md:
+            try:
+                chosen_md = md(html_fallback or "", strip=["script", "style"]) or ""
+                chosen_source = "html-fallback"
+            except Exception:
+                chosen_md = ""
+        if not chosen_md:
+            raise HTTPException(502, "content extraction failed")
 
     content = chosen_md.strip()
     if len(content) > max_chars:
