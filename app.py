@@ -21,10 +21,19 @@ Dobre praktyki:
 - jawne etykiety autora, licencji i wersji
 """
 from fastapi import FastAPI, Query, HTTPException, Response
-from pydantic import BaseModel
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, Field
+try:
+    # Pydantic v2
+    from pydantic import ConfigDict
+except Exception:  # pragma: no cover
+    ConfigDict = dict  # type: ignore
 from typing import List, Optional, Tuple, Dict
+from typing import Union
 import asyncio
 import httpx
+import json
+import ast
 import os
 import re
 
@@ -74,6 +83,7 @@ class WebResult(BaseModel):
     query: str
     items: List[WebItem]
     next_page: Optional[int] = None
+    batch_fetch_hint_get: Optional[str] = None
 
 class FetchResult(BaseModel):
     url: str
@@ -94,13 +104,20 @@ class About(BaseModel):
     contact: str
     endpoints: List[str]
     env: Dict[str, str]
+    openapi_url: str
+    docs_url: str
+    redoc_url: Optional[str]
+    examples: Dict[str, str]
 
-class BatchFetchRequest(BaseModel):
-    urls: List[str]
+class FetchRequest(BaseModel):
+    # Hybrydowy request: jedno pole 'url' (string lub lista) i/lub 'urls' (lista)
+    model_config = ConfigDict(populate_by_name=True)
+    url: Optional[Union[str, List[str]]] = Field(default=None, alias="url")
+    urls: Optional[List[str]] = None
     max_chars: int = 8000
-    concurrency: int = 5
+    concurrency: Optional[int] = None
 
-class BatchFetchResponse(BaseModel):
+class FetchResponse(BaseModel):
     results: List[FetchResult]
     errors: Dict[str, str]
 
@@ -226,7 +243,7 @@ async def about():
         license=__license__,
         homepage=__url__,
         contact=__contact__,
-        endpoints=["/health", "/search", "/fetch", "/batch_fetch", "/about"],
+        endpoints=["/health", "/search", "/fetch", "/about", "/ui"],
         env={
             "SEARXNG_URL": SEARXNG_URL,
             "TIMEOUT_S": str(TIMEOUT_S),
@@ -238,6 +255,17 @@ async def about():
             "ACCEPT_LANGUAGE": ACCEPT_LANG,
             "USER_AGENT": USER_AGENT,
         },
+        openapi_url="/openapi.json",
+        docs_url="/docs",
+        redoc_url="/redoc",
+        examples={
+            "health": 'curl -sS http://localhost:7000/health',
+            "about": 'curl -sS http://localhost:7000/about',
+            "search": 'curl -sS "http://localhost:7000/search?q=openai&limit=3&safesearch=moderate"',
+            "fetch_single_get": 'curl -sS "http://localhost:7000/fetch?url=https://example.com&max_chars=2000"',
+            "fetch_multi_post": 'curl -sS -H "Content-Type: application/json" -d \'{"urls":["https://example.com","https://httpbin.org/json"],"max_chars":1500,"concurrency":4}\' http://localhost:7000/fetch',
+            "fetch_multi_get": 'curl -sS "http://localhost:7000/fetch?url=https://example.com&url=https://httpbin.org/json&max_chars=1500&concurrency=4"',
+        },
     )
 
 @app.get("/health")
@@ -246,13 +274,20 @@ async def health():
 
 @app.get("/search", response_model=WebResult)
 async def search(
-    q: str = Query(..., min_length=2),
-    site: Optional[str] = Query(None),
-    time_range: Optional[str] = Query(None),
-    page: int = Query(1, ge=1),
-    limit: int = Query(5, ge=1, le=20),
-    language: Optional[str] = Query(None),
-    safesearch: Optional[int] = Query(None, ge=0, le=2),
+    q: str = Query(..., min_length=2, description="Zapytanie wyszukiwania, min 2 znaki"),
+    site: Optional[str] = Query(None, description="Ogranicz do domeny, np. example.com"),
+    time_range: Optional[str] = Query(
+        None,
+        description="Filtr czasu: day|week|month|year",
+    ),
+    page: int = Query(1, ge=1, description="Numer strony (>=1)"),
+    limit: int = Query(5, ge=1, le=20, description="Maks. liczba wyników (1-20)"),
+    language: Optional[str] = Query(None, description="Preferowany język, np. pl, en, de"),
+    safesearch: Optional[str] = Query(
+        None,
+        description="Poziom filtracji: 0|1|2 lub off|moderate|strict",
+        example="moderate",
+    ),
     response: Response = None,
 ):
     if client is None:
@@ -260,12 +295,28 @@ async def search(
 
     query = f"site:{site} {q}" if site else q
     params = {"q": query, "format": "json", "pageno": str(page)}
-    if time_range in {"day", "week", "month", "year"}:
-        params["time_range"] = time_range
+    allowed_ranges = {"day", "week", "month", "year"}
+    tr = (time_range or "").strip()
+    # Toleruj wartości często generowane przez narzędzia/LLM: "null", "none", "undefined", "-"
+    if tr.lower() in {"null", "none", "undefined", "-"}:
+        tr = ""
+    if tr:
+        if tr not in allowed_ranges:
+            raise HTTPException(422, f"invalid time_range; allowed: {', '.join(sorted(allowed_ranges))}")
+        params["time_range"] = tr
     if language:
         params["language"] = language
+    # Parse safesearch accepting numbers and common aliases
     if safesearch is not None:
-        params["safesearch"] = str(safesearch)
+        ss_map = {
+            "0": 0, "off": 0, "none": 0,
+            "1": 1, "moderate": 1, "med": 1,
+            "2": 2, "strict": 2, "safe": 2,
+        }
+        val = ss_map.get(str(safesearch).strip().lower())
+        if val is None:
+            raise HTTPException(422, "invalid safesearch; allowed: 0|1|2 or off|moderate|strict")
+        params["safesearch"] = str(val)
 
     url = searx_search_url(SEARXNG_URL)
     try:
@@ -294,17 +345,21 @@ async def search(
         response.headers["X-Tool-Version"] = __version__
         response.headers["X-Tool-Source"] = "search"
 
-    return WebResult(query=q, items=items, next_page=next_page)
+    # Build a convenience hint to batch-fetch the URLs returned here
+    try:
+        from urllib.parse import quote_plus
+        urls = [it.url for it in items if it.url]
+        hint = None
+        if urls:
+            qs = "&".join(f"url={quote_plus(u)}" for u in urls)
+            conc = min(8, len(urls))
+            hint = f"/fetch?{qs}&concurrency={conc}"
+    except Exception:
+        hint = None
 
-@app.get("/fetch", response_model=FetchResult)
-async def fetch_url(
-    url: str = Query(...),
-    max_chars: int = Query(8000, ge=500, le=1000000),
-    response: Response = None,
-):
-    if client is None:
-        raise HTTPException(503, "client not ready")
+    return WebResult(query=q, items=items, next_page=next_page, batch_fetch_hint_get=hint)
 
+async def _fetch_one(url: str, max_chars: int) -> FetchResult:
     truncated = False
     if max_chars > HARD_MAX_CHARS:
         max_chars = HARD_MAX_CHARS
@@ -326,12 +381,6 @@ async def fetch_url(
 
     if not is_html:
         text = resp.text[:max_chars]
-        if response is not None:
-            response.headers["X-Tool-Name"] = __title__
-            response.headers["X-Tool-Version"] = __version__
-            response.headers["X-Tool-Source"] = "raw"
-            if truncated:
-                response.headers["X-Content-Truncated"] = "true"
         return FetchResult(
             url=url,
             title=None,
@@ -385,13 +434,6 @@ async def fetch_url(
     author = safe_author(traf_meta.get("author") or read_meta.get("author"))
     date = traf_meta.get("date")
 
-    if response is not None:
-        response.headers["X-Tool-Name"] = __title__
-        response.headers["X-Tool-Version"] = __version__
-        response.headers["X-Tool-Source"] = chosen_source
-        if truncated:
-            response.headers["X-Content-Truncated"] = "true"
-
     return FetchResult(
         url=url,
         title=title,
@@ -404,12 +446,54 @@ async def fetch_url(
     )
 
 
-@app.post("/batch_fetch", response_model=BatchFetchResponse)
-async def batch_fetch(request: BatchFetchRequest, response: Response = None):
+@app.get(
+    
+    "/fetch",
+    response_model=FetchResponse,
+    summary="Pobierz treść z jednego lub wielu URLi (GET)",
+    description=(
+        "Powtarzaj parametr url wiele razy lub użyj jednej wartości będącej listą JSON. "
+        "Dla >1 URL działa równolegle. Concurrency: 1-20 (domyślnie min(8, n))."
+    ),
+)
+async def fetch_get(
+    url: List[str] = Query(..., description="Powtarzalny parametr ?url=... dla wielu adresów. Akceptuje też jedną wartość będącą JSON listą."),
+    max_chars: int = Query(8000, ge=500, le=1000000, description="Limit znaków Markdown"),
+    concurrency: Optional[int] = Query(None, ge=1, le=20, description="Współbieżność 1-20; domyślnie min(8,len(url))"),
+    response: Response = None,
+):
     if client is None:
         raise HTTPException(503, "client not ready")
 
-    sem = asyncio.Semaphore(max(1, min(request.concurrency, 20)))
+    # Znormalizuj url: dopuszczamy formaty: powtarzany parametr, lista JSON w jednym parametrze, oraz CSV
+    normalized: List[str] = []
+    for u in url:
+        s = (u or '').strip()
+        if not s:
+            continue
+        if (s.startswith('[') and s.endswith(']')):
+            try:
+                arr = json.loads(s)
+                if isinstance(arr, list):
+                    normalized.extend([str(x).strip() for x in arr if x])
+                    continue
+            except Exception:
+                try:
+                    arr = ast.literal_eval(s)
+                    if isinstance(arr, list):
+                        normalized.extend([str(x).strip() for x in arr if x])
+                        continue
+                except Exception:
+                    pass
+        normalized.append(s.strip().strip('"\''))
+
+    if not normalized:
+        raise HTTPException(422, "no valid URLs provided in 'url' parameter")
+
+    auto_c = min(8, max(1, len(normalized)))
+    chosen_c = concurrency if (concurrency and concurrency > 0) else auto_c
+    chosen_c = max(1, min(chosen_c, 20))
+    sem = asyncio.Semaphore(chosen_c)
     results: List[FetchResult] = []
     errors: Dict[str, str] = {}
 
@@ -417,18 +501,250 @@ async def batch_fetch(request: BatchFetchRequest, response: Response = None):
         nonlocal results, errors
         async with sem:
             try:
-                res = await fetch_url(url=u, max_chars=request.max_chars)
+                res = await _fetch_one(u, max_chars)
                 results.append(res)
             except HTTPException as he:
                 errors[u] = f"{he.status_code}: {he.detail}"
             except Exception as e:
                 errors[u] = str(e)
 
-    await asyncio.gather(*[_one(u) for u in request.urls])
+    await asyncio.gather(*[_one(u) for u in normalized])
 
     if response is not None:
         response.headers["X-Tool-Name"] = __title__
         response.headers["X-Tool-Version"] = __version__
-        response.headers["X-Tool-Source"] = "batch"
+        response.headers["X-Tool-Source"] = "fetch"
+        response.headers["X-Concurrency"] = str(chosen_c)
 
-    return BatchFetchResponse(results=results, errors=errors)
+    return FetchResponse(results=results, errors=errors)
+
+
+@app.post(
+    
+    "/fetch",
+    response_model=FetchResponse,
+    summary="Pobierz treść z jednego lub wielu URLi (POST)",
+    description=(
+        "Body JSON: {url: string|array, urls: array}. Dla >1 URL działa równolegle. "
+        "Concurrency 1-20; domyślnie min(8, n)."
+    ),
+)
+async def fetch_post(request: FetchRequest, response: Response = None):
+    if client is None:
+        raise HTTPException(503, "client not ready")
+
+    req_urls: List[str] = []
+    if request.urls:
+        req_urls.extend([u for u in request.urls if u])
+    if request.url:
+        if isinstance(request.url, list):
+            req_urls.extend([u for u in request.url if u])
+        elif isinstance(request.url, str):
+            s = request.url.strip()
+            if s.startswith('[') and s.endswith(']'):
+                try:
+                    arr = json.loads(s)
+                    if isinstance(arr, list):
+                        req_urls.extend([str(x).strip() for x in arr if x])
+                except Exception:
+                    try:
+                        arr = ast.literal_eval(s)
+                        if isinstance(arr, list):
+                            req_urls.extend([str(x).strip() for x in arr if x])
+                        else:
+                            req_urls.append(s)
+                    except Exception:
+                        req_urls.append(s)
+            elif s:
+                req_urls.append(s)
+    if not req_urls:
+        raise HTTPException(422, "no URLs provided: use 'url' or 'urls'")
+
+    auto_c = min(8, max(1, len(req_urls)))
+    chosen_c = request.concurrency if (request.concurrency and request.concurrency > 0) else auto_c
+    chosen_c = max(1, min(chosen_c, 20))
+    sem = asyncio.Semaphore(chosen_c)
+    results: List[FetchResult] = []
+    errors: Dict[str, str] = {}
+
+    async def _one(u: str):
+        nonlocal results, errors
+        async with sem:
+            try:
+                res = await _fetch_one(u, request.max_chars)
+                results.append(res)
+            except HTTPException as he:
+                errors[u] = f"{he.status_code}: {he.detail}"
+            except Exception as e:
+                errors[u] = str(e)
+
+    await asyncio.gather(*[_one(u) for u in req_urls])
+
+    if response is not None:
+        response.headers["X-Tool-Name"] = __title__
+        response.headers["X-Tool-Version"] = __version__
+        response.headers["X-Tool-Source"] = "fetch"
+        response.headers["X-Concurrency"] = str(chosen_c)
+
+    return FetchResponse(results=results, errors=errors)
+
+
+@app.get("/ui", response_class=HTMLResponse)
+async def ui_page():
+    return """
+<!doctype html>
+<html lang=pl>
+<head>
+  <meta charset=utf-8>
+  <meta name=viewport content="width=device-width, initial-scale=1">
+  <title>SearXNG OpenAPI Tool – Test UI</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial,sans-serif;margin:24px;line-height:1.4}
+    h1{font-size:20px;margin:0 0 12px}
+    h2{font-size:16px;margin:20px 0 8px}
+    fieldset{border:1px solid #ddd;padding:12px;margin-bottom:16px}
+    legend{padding:0 6px;color:#444}
+    label{display:block;margin:6px 0 4px;font-size:13px;color:#333}
+    input,select,textarea{width:100%;max-width:900px;padding:8px;border:1px solid #ccc;border-radius:6px}
+    textarea{min-height:80px}
+    button{margin-top:8px;padding:8px 12px;border:1px solid #1976d2;background:#1976d2;color:#fff;border-radius:6px;cursor:pointer}
+    button.secondary{background:#555;border-color:#555}
+    .row{display:flex;gap:12px;flex-wrap:wrap}
+    .col{flex:1 1 260px}
+    pre{background:#0b1021;color:#d6e1ff;padding:12px;border-radius:6px;overflow:auto;max-height:50vh}
+    .muted{color:#666;font-size:12px}
+  </style>
+  <script>
+    async function apiGet(path){
+      const r = await fetch(path,{headers:{'Accept':'application/json'}});
+      const t = await r.text();
+      return { ok:r.ok, status:r.status, headers:Object.fromEntries(r.headers.entries()), text:t, json:safeJSON(t) };
+    }
+    async function apiPost(path, body){
+      const r = await fetch(path,{method:'POST', headers:{'Content-Type':'application/json','Accept':'application/json'}, body:JSON.stringify(body)});
+      const t = await r.text();
+      return { ok:r.ok, status:r.status, headers:Object.fromEntries(r.headers.entries()), text:t, json:safeJSON(t) };
+    }
+    function safeJSON(t){ try { return JSON.parse(t) } catch(_) { return null } }
+    function show(id, res){
+      const el = document.getElementById(id);
+      const headers = res.headers||{};
+      const meta = { status: res.status, ...(['x-tool-name','x-tool-version','x-tool-source','x-concurrency','x-content-truncated'].reduce((a,k)=>{ if(headers[k]) a[k]=headers[k]; return a; },{})) };
+      el.textContent = JSON.stringify({ meta, body: res.json ?? res.text }, null, 2);
+    }
+    function q(id){ return document.getElementById(id).value }
+    function buildQS(params){
+      const usp = new URLSearchParams();
+      Object.entries(params).forEach(([k,v])=>{ if(v!==undefined && v!==null && String(v).trim()!==''){ usp.set(k, v) } });
+      return usp.toString();
+    }
+
+    // Handlers
+    async function ping(){ show('out-health', await apiGet('/health')) }
+    async function about(){ show('out-about', await apiGet('/about')) }
+    async function runSearch(){
+      const qs = buildQS({ q:q('s-q'), site:q('s-site'), time_range:q('s-tr'), page:q('s-page'), limit:q('s-limit'), language:q('s-lang'), safesearch:q('s-ss') });
+      show('out-search', await apiGet('/search?'+qs));
+    }
+    async function runFetch(){
+      const qs = buildQS({ url:q('f-url'), max_chars:q('f-max') });
+      show('out-fetch', await apiGet('/fetch?'+qs));
+    }
+    function parseList(s){
+      const t = s.trim();
+      if(!t) return [];
+      // Try JSON array
+      try { const a = JSON.parse(t); if(Array.isArray(a)) return a.map(x=>String(x)); } catch(_){ }
+      // Split only by newlines (do NOT split by commas; commas can be valid in URLs)
+      const lines = t.split('\\r').join('\\n').split('\\n');
+      const out = [];
+      for(const line of lines){ const v = line.trim(); if(v) out.push(v); }
+      return out;
+    }
+    async function runBatchGet(){
+      const urls = parseList(q('b-urls'));
+      const usp = new URLSearchParams();
+      urls.forEach(u=>usp.append('url', u));
+      const mx = q('b-max'); const cc = q('b-conc');
+      if(mx) usp.set('max_chars', mx);
+      if(cc) usp.set('concurrency', cc);
+      show('out-batch', await apiGet('/fetch?'+usp.toString()));
+    }
+    async function runBatchPost(){
+      const urls = parseList(q('b-urls'));
+      const body = { urls: urls, max_chars: Number(q('b-max')||8000) };
+      const cc = q('b-conc'); if(cc) body.concurrency = Number(cc);
+      show('out-batch', await apiPost('/fetch', body));
+    }
+
+    // Using inline onclick attributes below to call handlers
+  </script>
+  </head>
+  <body>
+    <h1>SearXNG OpenAPI Tool – Test UI</h1>
+    <p class=muted>
+      Szybkie testy endpointów. Dla wielu URL-i preferuj <code>/fetch</code> z wieloma parametrami <code>url</code> lub body JSON. Dokumentacja: <a href="/docs">/docs</a>, OpenAPI: <a href="/openapi.json">/openapi.json</a>.
+    </p>
+
+    <fieldset>
+      <legend>Health & About</legend>
+      <div class=row>
+        <div class=col>
+          <button onclick="ping()">GET /health</button>
+          <pre id=out-health></pre>
+        </div>
+        <div class=col>
+          <button class=secondary onclick="about()">GET /about</button>
+          <pre id=out-about></pre>
+        </div>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Search</legend>
+      <div class=row>
+        <div class=col><label>q</label><input id=s-q placeholder="openai"></div>
+        <div class=col><label>site</label><input id=s-site placeholder="example.com"></div>
+        <div class=col><label>time_range</label><input id=s-tr placeholder="day|week|month|year"></div>
+        <div class=col><label>page</label><input id=s-page type=number value=1></div>
+        <div class=col><label>limit</label><input id=s-limit type=number value=5></div>
+        <div class=col><label>language</label><input id=s-lang placeholder="pl|en|de"></div>
+        <div class=col><label>safesearch</label><input id=s-ss placeholder="0|1|2|off|moderate|strict"></div>
+      </div>
+      <button onclick="runSearch()">GET /search</button>
+      <pre id=out-search></pre>
+    </fieldset>
+
+    <fieldset>
+      <legend>Fetch (single)</legend>
+      <div class=row>
+        <div class=col><label>url</label><input id=f-url placeholder="https://example.com"></div>
+        <div class=col><label>max_chars</label><input id=f-max type=number value=8000></div>
+      </div>
+      <button onclick="runFetch()">GET /fetch</button>
+      <pre id=out-fetch></pre>
+    </fieldset>
+
+    <fieldset>
+      <legend>Fetch: wiele URL-i (GET / POST)</legend>
+      <div class=row>
+        <div class=col>
+          <label>URLs (jeden na linię lub JSON [..])</label>
+          <textarea id=b-urls placeholder="https://example.com\nhttps://httpbin.org/json"></textarea>
+        </div>
+        <div class=col>
+          <label>max_chars</label>
+          <input id=b-max type=number value=8000>
+          <label>concurrency</label>
+          <input id=b-conc type=number placeholder="auto (min(8, n))">
+        </div>
+      </div>
+      <div class=row>
+        <div class=col><button onclick="runBatchGet()">GET /fetch</button></div>
+        <div class=col><button class=secondary onclick="runBatchPost()">POST /fetch</button></div>
+      </div>
+      <pre id=out-batch></pre>
+    </fieldset>
+  </body>
+  </html>
+  """
