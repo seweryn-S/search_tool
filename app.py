@@ -723,7 +723,7 @@ async def ui_page():
     <fieldset>
       <legend>Search</legend>
       <div class=row>
-        <div class=col><label>q</label><input id=s-q placeholder="openai"></div>
+        <div class=col><label>q</label><input id=s-q value="openai" placeholder="openai"></div>
         <div class=col><label>site</label><input id=s-site placeholder="example.com"></div>
         <div class=col><label>time_range</label><input id=s-tr placeholder="day|week|month|year"></div>
         <div class=col><label>page</label><input id=s-page type=number value=1></div>
@@ -738,7 +738,7 @@ async def ui_page():
     <fieldset>
       <legend>Fetch (single)</legend>
       <div class=row>
-        <div class=col><label>url</label><input id=f-url placeholder="https://example.com"></div>
+        <div class=col><label>url</label><input id=f-url value="https://example.com" placeholder="https://example.com"></div>
         <div class=col><label>max_chars</label><input id=f-max type=number value=8000></div>
       </div>
       <button onclick="runFetch()">GET /fetch</button>
@@ -750,7 +750,8 @@ async def ui_page():
       <div class=row>
         <div class=col>
           <label>URLs (jeden na linię lub JSON [..])</label>
-          <textarea id=b-urls placeholder="https://example.com\nhttps://httpbin.org/json"></textarea>
+          <textarea id=b-urls>https://example.com
+https://httpbin.org/json</textarea>
         </div>
         <div class=col>
           <label>max_chars</label>
