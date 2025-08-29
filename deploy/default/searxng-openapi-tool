@@ -1,0 +1,34 @@
+# Defaults for SearXNG OpenAPI Tool (container-first)
+# Copy to: /etc/default/searxng-openapi-tool
+
+# --- App environment (passed into container) ---
+# Upstream SearXNG endpoint
+SEARXNG_URL=http://localhost:7000
+
+# HTTP client tuning
+TIMEOUT_S=5.0
+MAX_CONN=200
+MAX_KEEP=100
+
+# Extraction & output limits
+MIN_OUTPUT_CHARS=200
+HARD_MAX_CHARS=40000
+EXTRACT_TIMEOUT_S=6.0
+
+# Locale / UA
+ACCEPT_LANGUAGE=pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7
+USER_AGENT=Mozilla/5.0 (compatible; searxng-openapi-tool/0.4.1)
+
+# --- For systemd unit variant: Docker Compose ---
+# Directory containing docker-compose.yaml (project root)
+# Adjust to repo location on host (not inside container)
+# Absolute path to this project repo on the host (adjust)
+COMPOSE_DIR=/path/to/searxng-openapi-tool
+
+# --- For systemd unit variant: docker run ---
+# Published port on host
+PORT=7000
+# Image to run (local tag or registry reference)
+IMAGE=searxng-openapi-tool:latest
+# Container name
+CONTAINER_NAME=searxng-openapi-tool

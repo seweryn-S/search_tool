@@ -1,0 +1,21 @@
+[Unit]
+Description=SearXNG OpenAPI Tool (Docker Compose)
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/default/searxng-openapi-tool
+RemainAfterExit=yes
+
+ExecStart=/bin/sh -lc 'cd "$COMPOSE_DIR" && exec docker compose up -d --build'
+ExecReload=/bin/sh -lc 'cd "$COMPOSE_DIR" && exec docker compose up -d --build'
+ExecStop=/bin/sh -lc 'cd "$COMPOSE_DIR" && exec docker compose down --remove-orphans'
+
+TimeoutStartSec=120
+TimeoutStopSec=30
+KillMode=mixed
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,19 @@
+[Unit]
+Description=SearXNG OpenAPI Tool (Docker run)
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/default/searxng-openapi-tool
+# Use a shell so $VAR gets expanded from EnvironmentFile
+ExecStart=/bin/sh -lc 'exec docker run --name "${CONTAINER_NAME:-searxng-openapi-tool}" \
+  --rm -p "${PORT:-7000}:7000" --env-file /etc/default/searxng-openapi-tool \
+  "${IMAGE:-searxng-openapi-tool:latest}"'
+ExecStop=/bin/sh -lc 'docker stop "${CONTAINER_NAME:-searxng-openapi-tool}"'
+ExecStopPost=/bin/sh -lc 'docker rm -f "${CONTAINER_NAME:-searxng-openapi-tool}"'
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
