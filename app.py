@@ -23,6 +23,7 @@ Dobre praktyki:
 from fastapi import FastAPI, Query, HTTPException, Response
 from pydantic import BaseModel
 from typing import List, Optional, Tuple, Dict
+import asyncio
 import httpx
 import os
 import re
@@ -59,6 +60,7 @@ USER_AGENT = os.environ.get(
 ACCEPT_LANG = os.environ.get("ACCEPT_LANGUAGE", "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7")
 MIN_OUTPUT_CHARS = int(os.environ.get("MIN_OUTPUT_CHARS", "200"))
 HARD_MAX_CHARS = int(os.environ.get("HARD_MAX_CHARS", "40000"))
+EXTRACT_TIMEOUT_S = float(os.environ.get("EXTRACT_TIMEOUT_S", "6.0"))
 
 client: Optional[httpx.AsyncClient] = None
 
@@ -92,6 +94,15 @@ class About(BaseModel):
     contact: str
     endpoints: List[str]
     env: Dict[str, str]
+
+class BatchFetchRequest(BaseModel):
+    urls: List[str]
+    max_chars: int = 8000
+    concurrency: int = 5
+
+class BatchFetchResponse(BaseModel):
+    results: List[FetchResult]
+    errors: Dict[str, str]
 
 # --- Trafilatura config ---
 TRA_CFG = use_config()
@@ -215,7 +226,7 @@ async def about():
         license=__license__,
         homepage=__url__,
         contact=__contact__,
-        endpoints=["/health", "/search", "/fetch", "/about"],
+        endpoints=["/health", "/search", "/fetch", "/batch_fetch", "/about"],
         env={
             "SEARXNG_URL": SEARXNG_URL,
             "TIMEOUT_S": str(TIMEOUT_S),
@@ -223,6 +234,7 @@ async def about():
             "MAX_KEEP": str(MAX_KEEP),
             "HARD_MAX_CHARS": str(HARD_MAX_CHARS),
             "MIN_OUTPUT_CHARS": str(MIN_OUTPUT_CHARS),
+            "EXTRACT_TIMEOUT_S": str(EXTRACT_TIMEOUT_S),
             "ACCEPT_LANGUAGE": ACCEPT_LANG,
             "USER_AGENT": USER_AGENT,
         },
@@ -332,8 +344,21 @@ async def fetch_url(
         )
 
     html_bytes = resp.content
-    traf_md, traf_meta = trafilatura_extract(html_bytes, url)
-    read_md, read_meta = readability_extract(html_bytes)
+
+    async def _run_trafilatura():
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(trafilatura_extract, html_bytes, url), EXTRACT_TIMEOUT_S)
+        except Exception:
+            return "", {"title": None, "author": None, "date": None}
+
+    async def _run_readability():
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(readability_extract, html_bytes), EXTRACT_TIMEOUT_S)
+        except Exception:
+            return "", {"title": None, "author": None, "date": None}
+
+    traf_md, traf_meta = await _run_trafilatura()
+    read_md, read_meta = await _run_readability()
 
     sc_traf = score_markdown(traf_md)
     sc_read = score_markdown(read_md)
@@ -377,3 +402,33 @@ async def fetch_url(
         content_type=ctype,
         source=chosen_source,
     )
+
+
+@app.post("/batch_fetch", response_model=BatchFetchResponse)
+async def batch_fetch(request: BatchFetchRequest, response: Response = None):
+    if client is None:
+        raise HTTPException(503, "client not ready")
+
+    sem = asyncio.Semaphore(max(1, min(request.concurrency, 20)))
+    results: List[FetchResult] = []
+    errors: Dict[str, str] = {}
+
+    async def _one(u: str):
+        nonlocal results, errors
+        async with sem:
+            try:
+                res = await fetch_url(url=u, max_chars=request.max_chars)
+                results.append(res)
+            except HTTPException as he:
+                errors[u] = f"{he.status_code}: {he.detail}"
+            except Exception as e:
+                errors[u] = str(e)
+
+    await asyncio.gather(*[_one(u) for u in request.urls])
+
+    if response is not None:
+        response.headers["X-Tool-Name"] = __title__
+        response.headers["X-Tool-Version"] = __version__
+        response.headers["X-Tool-Source"] = "batch"
+
+    return BatchFetchResponse(results=results, errors=errors)
