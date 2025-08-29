@@ -275,7 +275,7 @@ async def health():
 @app.get("/search", response_model=WebResult)
 async def search(
     q: str = Query(..., min_length=2, description="Zapytanie wyszukiwania, min 2 znaki"),
-    site: Optional[str] = Query(None, description="Ogranicz do domeny, np. example.com"),
+    site: Optional[str] = Query(None, description="Ogranicz do domeny, np. example.com (wartości 'null'/'none'/'undefined' traktowane jak puste)"),
     time_range: Optional[str] = Query(
         None,
         description="Filtr czasu: day|week|month|year",
@@ -293,7 +293,11 @@ async def search(
     if client is None:
         raise HTTPException(503, "client not ready")
 
-    query = f"site:{site} {q}" if site else q
+    # Normalize 'site': treat "null"/"none"/"undefined"/"-"/"" as empty
+    site_norm = (site or "").strip()
+    if site_norm.lower() in {"null", "none", "undefined", "-"}:
+        site_norm = ""
+    query = f"site:{site_norm} {q}" if site_norm else q
     params = {"q": query, "format": "json", "pageno": str(page)}
     allowed_ranges = {"day", "week", "month", "year"}
     tr = (time_range or "").strip()
