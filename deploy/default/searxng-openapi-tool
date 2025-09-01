@@ -14,6 +14,8 @@ MAX_KEEP=100
 MIN_OUTPUT_CHARS=200
 HARD_MAX_CHARS=40000
 EXTRACT_TIMEOUT_S=6.0
+# Show batch-fetch hint in /search results (0/1; default 0)
+SEARCH_SHOW_HINTS=0
 
 # Locale / UA
 ACCEPT_LANGUAGE=pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7

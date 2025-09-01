@@ -70,6 +70,9 @@ ACCEPT_LANG = os.environ.get("ACCEPT_LANGUAGE", "pl-PL,pl;q=0.9,en-US;q=0.8,en;q
 MIN_OUTPUT_CHARS = int(os.environ.get("MIN_OUTPUT_CHARS", "200"))
 HARD_MAX_CHARS = int(os.environ.get("HARD_MAX_CHARS", "40000"))
 EXTRACT_TIMEOUT_S = float(os.environ.get("EXTRACT_TIMEOUT_S", "6.0"))
+SEARCH_SHOW_HINTS = (
+    os.environ.get("SEARCH_SHOW_HINTS", "0").strip().lower() in {"1", "true", "yes", "on"}
+)
 
 client: Optional[httpx.AsyncClient] = None
 
@@ -254,6 +257,7 @@ async def about():
             "EXTRACT_TIMEOUT_S": str(EXTRACT_TIMEOUT_S),
             "ACCEPT_LANGUAGE": ACCEPT_LANG,
             "USER_AGENT": USER_AGENT,
+            "SEARCH_SHOW_HINTS": str(SEARCH_SHOW_HINTS),
         },
         openapi_url="/openapi.json",
         docs_url="/docs",
@@ -272,7 +276,12 @@ async def about():
 async def health():
     return {"status": "ok"}
 
-@app.get("/search", response_model=WebResult)
+@app.get(
+    "/search",
+    response_model=WebResult,
+    # Gdy hinty są wyłączone, usuń pole z odpowiedzi niezależnie od wartości None
+    response_model_exclude={"batch_fetch_hint_get"} if not SEARCH_SHOW_HINTS else set(),
+)
 async def search(
     q: str = Query(..., min_length=2, description="Zapytanie wyszukiwania, min 2 znaki"),
     site: Optional[str] = Query(None, description="Ogranicz do domeny, np. example.com (wartości 'null'/'none'/'undefined' traktowane jak puste)"),
@@ -349,19 +358,24 @@ async def search(
         response.headers["X-Tool-Version"] = __version__
         response.headers["X-Tool-Source"] = "search"
 
-    # Build a convenience hint to batch-fetch the URLs returned here
-    try:
-        from urllib.parse import quote_plus
-        urls = [it.url for it in items if it.url]
-        hint = None
-        if urls:
-            qs = "&".join(f"url={quote_plus(u)}" for u in urls)
-            conc = min(8, len(urls))
-            hint = f"/fetch?{qs}&concurrency={conc}"
-    except Exception:
-        hint = None
+    # Build a convenience hint to batch-fetch the URLs returned here (optional)
+    hint = None
+    if SEARCH_SHOW_HINTS:
+        try:
+            from urllib.parse import quote_plus
+            urls = [it.url for it in items if it.url]
+            if urls:
+                qs = "&".join(f"url={quote_plus(u)}" for u in urls)
+                conc = min(8, len(urls))
+                hint = f"/fetch?{qs}&concurrency={conc}"
+        except Exception:
+            hint = None
 
-    return WebResult(query=q, items=items, next_page=next_page, batch_fetch_hint_get=hint)
+    # Build response payload; omit hint key when hints are disabled
+    payload: Dict[str, object] = {"query": q, "items": items, "next_page": next_page}
+    if SEARCH_SHOW_HINTS and hint:
+        payload["batch_fetch_hint_get"] = hint
+    return payload  # FastAPI will validate against WebResult
 
 async def _fetch_one(url: str, max_chars: int) -> FetchResult:
     truncated = False
