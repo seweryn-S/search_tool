@@ -237,7 +237,7 @@ def readability_extract(html_bytes: bytes) -> Tuple[str, Dict[str, Optional[str]
     return md_text.strip(), {"title": title, "author": None, "date": None}
 
 # --- Endpoints ---
-@app.get("/about", response_model=About)
+@app.get("/about", response_model=About, operation_id="about")
 async def about():
     return About(
         name=__title__,
@@ -272,7 +272,7 @@ async def about():
         },
     )
 
-@app.get("/health")
+@app.get("/health", operation_id="health")
 async def health():
     return {"status": "ok"}
 
@@ -281,6 +281,7 @@ async def health():
     response_model=WebResult,
     # Gdy hinty są wyłączone, usuń pole z odpowiedzi niezależnie od wartości None
     response_model_exclude={"batch_fetch_hint_get"} if not SEARCH_SHOW_HINTS else set(),
+    operation_id="search",
 )
 async def search(
     q: str = Query(..., min_length=2, description="Zapytanie wyszukiwania, min 2 znaki"),
@@ -489,6 +490,7 @@ async def _fetch_one(url: str, max_chars: int) -> FetchResult:
         "Powtarzaj parametr url wiele razy lub użyj jednej wartości będącej listą JSON. "
         "Dla >1 URL działa równolegle. Concurrency: 1-20 (domyślnie min(8, n))."
     ),
+    operation_id="fetch_get",
 )
 async def fetch_get(
     url: List[str] = Query(..., description="Powtarzalny parametr ?url=... dla wielu adresów. Akceptuje też jedną wartość będącą JSON listą."),
@@ -562,6 +564,7 @@ async def fetch_get(
         "Body JSON: {url: string|array, urls: array}. Dla >1 URL działa równolegle. "
         "Concurrency 1-20; domyślnie min(8, n)."
     ),
+    operation_id="fetch_post",
 )
 async def fetch_post(request: FetchRequest, response: Response = None):
     if client is None:
@@ -623,7 +626,7 @@ async def fetch_post(request: FetchRequest, response: Response = None):
     return FetchResponse(results=results, errors=errors)
 
 
-@app.get("/ui", response_class=HTMLResponse)
+@app.get("/ui", response_class=HTMLResponse, include_in_schema=False)
 async def ui_page():
     return """
 <!doctype html>
