@@ -4,7 +4,7 @@ SearXNG OpenAPI Tool
 
 - Autor: Seweryn Sitarski, Kat (asysta kodowa)
 - Kontakt: seweryn.sitarski@gmail.com
-- Wersja: 0.4.1
+- Wersja: 0.4.2
 - Licencja: MIT
 - URL projektu: https://example.local/searxng-openapi-tool
 
@@ -21,7 +21,7 @@ Dobre praktyki:
 - jawne etykiety autora, licencji i wersji
 """
 from fastapi import FastAPI, Query, HTTPException, Response
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, ORJSONResponse
 from pydantic import BaseModel, Field
 try:
     # Pydantic v2
@@ -32,7 +32,7 @@ from typing import List, Optional, Tuple, Dict
 from typing import Union
 import asyncio
 import httpx
-import json
+import orjson
 import ast
 import os
 import re
@@ -45,7 +45,7 @@ from readability.readability import Document
 from markdownify import markdownify as md
 
 __title__ = "searxng-openapi-tool"
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 __author__ = "Seweryn Sitarski, Kat"
 __license__ = "MIT"
 __contact__ = "seweryn.sitarski@gmail.com"
@@ -54,7 +54,8 @@ __url__ = "https://example.local/searxng-openapi-tool"
 app = FastAPI(
     title=__title__,
     version=__version__,
-    contact={"name": __author__, "email": __contact__}
+    contact={"name": __author__, "email": __contact__},
+    default_response_class=ORJSONResponse,
 )
 
 # --- Konfiguracja środowiska ---
@@ -341,7 +342,11 @@ async def search(
     if r.status_code != 200:
         raise HTTPException(r.status_code, f"searxng error: {r.text[:500]}")
 
-    data = r.json()
+    # Use orjson to parse upstream JSON for performance
+    try:
+        data = orjson.loads(r.content)
+    except orjson.JSONDecodeError:
+        raise HTTPException(502, f"invalid JSON from upstream: {r.text[:500]}")
     results = data.get("results", []) or []
 
     items: List[WebItem] = []
@@ -509,7 +514,7 @@ async def fetch_get(
             continue
         if (s.startswith('[') and s.endswith(']')):
             try:
-                arr = json.loads(s)
+                arr = orjson.loads(s)
                 if isinstance(arr, list):
                     normalized.extend([str(x).strip() for x in arr if x])
                     continue
@@ -580,7 +585,7 @@ async def fetch_post(request: FetchRequest, response: Response = None):
             s = request.url.strip()
             if s.startswith('[') and s.endswith(']'):
                 try:
-                    arr = json.loads(s)
+                    arr = orjson.loads(s)
                     if isinstance(arr, list):
                         req_urls.extend([str(x).strip() for x in arr if x])
                 except Exception:
