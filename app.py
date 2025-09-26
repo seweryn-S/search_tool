@@ -4,7 +4,7 @@ SearXNG OpenAPI Tool
 
 - Autor: Seweryn Sitarski, Kat (asysta kodowa)
 - Kontakt: seweryn.sitarski@gmail.com
-- Wersja: 0.4.2
+- Wersja: 0.6.0
 - Licencja: MIT
 - URL projektu: https://example.local/searxng-openapi-tool
 
@@ -45,7 +45,7 @@ from readability.readability import Document
 from markdownify import markdownify as md
 
 __title__ = "searxng-openapi-tool"
-__version__ = "0.4.2"
+__version__ = "0.6.0"
 __author__ = "Seweryn Sitarski, Kat"
 __license__ = "MIT"
 __contact__ = "seweryn.sitarski@gmail.com"
@@ -88,6 +88,11 @@ class WebResult(BaseModel):
     items: List[WebItem]
     next_page: Optional[int] = None
     batch_fetch_hint_get: Optional[str] = None
+
+
+class BatchSearchResponse(BaseModel):
+    results: List[Dict[str, object]]
+    errors: Dict[str, str] = Field(default_factory=dict)
 
 class FetchResult(BaseModel):
     url: str
@@ -173,6 +178,83 @@ def safe_author(author_field):
     if isinstance(author_field, (list, tuple, set)):
         return ", ".join([str(x).strip() for x in author_field if x])
     return str(author_field)
+
+
+def _expand_query_values(values: List[str]) -> List[str]:
+    normalized: List[str] = []
+    for raw in values:
+        s = (raw or "").strip()
+        if not s:
+            continue
+        if s.startswith("[") and s.endswith("]"):
+            try:
+                parsed = orjson.loads(s)
+                if isinstance(parsed, list):
+                    for item in parsed:
+                        val = str(item).strip()
+                        if val:
+                            normalized.append(val)
+                    continue
+            except Exception:
+                try:
+                    parsed = ast.literal_eval(s)
+                    if isinstance(parsed, list):
+                        for item in parsed:
+                            val = str(item).strip()
+                            if val:
+                                normalized.append(val)
+                        continue
+                except Exception:
+                    pass
+        normalized.append(s)
+    return normalized
+
+
+def _normalize_site(site: Optional[str]) -> str:
+    site_norm = (site or "").strip()
+    return "" if site_norm.lower() in {"null", "none", "undefined", "-"} else site_norm
+
+
+def _normalize_time_range(time_range: Optional[str]) -> Optional[str]:
+    if not time_range:
+        return None
+    candidate = time_range.strip()
+    if not candidate:
+        return None
+    if candidate.lower() in {"null", "none", "undefined", "-"}:
+        return None
+    allowed = {"day", "week", "month", "year"}
+    if candidate not in allowed:
+        raise HTTPException(422, f"invalid time_range; allowed: {', '.join(sorted(allowed))}")
+    return candidate
+
+
+def _parse_safesearch(safesearch: Optional[str]) -> Optional[str]:
+    if safesearch is None:
+        return None
+    ss_map = {
+        "0": "0",
+        "off": "0",
+        "none": "0",
+        "1": "1",
+        "moderate": "1",
+        "med": "1",
+        "2": "2",
+        "strict": "2",
+        "safe": "2",
+    }
+    key = str(safesearch).strip().lower()
+    value = ss_map.get(key)
+    if value is None:
+        raise HTTPException(422, "invalid safesearch; allowed: 0|1|2 or off|moderate|strict")
+    return value
+
+
+def _serialize_webresult(result: WebResult) -> Dict[str, object]:
+    payload = result.model_dump()
+    if not SEARCH_SHOW_HINTS or not payload.get("batch_fetch_hint_get"):
+        payload.pop("batch_fetch_hint_get", None)
+    return payload
 
 # --- Ekstraktory ---
 def trafilatura_extract(html_bytes: bytes, url: str) -> Tuple[str, Dict[str, Optional[str]]]:
@@ -267,6 +349,7 @@ async def about():
             "health": 'curl -sS http://localhost:7000/health',
             "about": 'curl -sS http://localhost:7000/about',
             "search": 'curl -sS "http://localhost:7000/search?q=openai&limit=3&safesearch=moderate"',
+            "search_multi": 'curl -sS "http://localhost:7000/search?q=openai&q=python&limit=2"',
             "fetch_single_get": 'curl -sS "http://localhost:7000/fetch?url=https://example.com&max_chars=2000"',
             "fetch_multi_post": 'curl -sS -H "Content-Type: application/json" -d \'{"urls":["https://example.com","https://httpbin.org/json"],"max_chars":1500,"concurrency":4}\' http://localhost:7000/fetch',
             "fetch_multi_get": 'curl -sS "http://localhost:7000/fetch?url=https://example.com&url=https://httpbin.org/json&max_chars=1500&concurrency=4"',
@@ -277,61 +360,26 @@ async def about():
 async def health():
     return {"status": "ok"}
 
-@app.get(
-    "/search",
-    response_model=WebResult,
-    # Gdy hinty są wyłączone, usuń pole z odpowiedzi niezależnie od wartości None
-    response_model_exclude={"batch_fetch_hint_get"} if not SEARCH_SHOW_HINTS else set(),
-    operation_id="search",
-)
-async def search(
-    q: str = Query(..., min_length=2, description="Zapytanie wyszukiwania, min 2 znaki"),
-    site: Optional[str] = Query(None, description="Ogranicz do domeny, np. example.com (wartości 'null'/'none'/'undefined' traktowane jak puste)"),
-    time_range: Optional[str] = Query(
-        None,
-        description="Filtr czasu: day|week|month|year",
-    ),
-    page: int = Query(1, ge=1, description="Numer strony (>=1)"),
-    limit: int = Query(5, ge=1, le=20, description="Maks. liczba wyników (1-20)"),
-    language: Optional[str] = Query(None, description="Preferowany język, np. pl, en, de"),
-    safesearch: Optional[str] = Query(
-        None,
-        description="Poziom filtracji: 0|1|2 lub off|moderate|strict",
-        example="moderate",
-    ),
-    response: Response = None,
-):
+async def _execute_search_query(
+    query: str,
+    site_norm: str,
+    time_range_value: Optional[str],
+    page: int,
+    limit: int,
+    language: Optional[str],
+    safesearch_value: Optional[str],
+) -> WebResult:
     if client is None:
         raise HTTPException(503, "client not ready")
 
-    # Normalize 'site': treat "null"/"none"/"undefined"/"-"/"" as empty
-    site_norm = (site or "").strip()
-    if site_norm.lower() in {"null", "none", "undefined", "-"}:
-        site_norm = ""
-    query = f"site:{site_norm} {q}" if site_norm else q
-    params = {"q": query, "format": "json", "pageno": str(page)}
-    allowed_ranges = {"day", "week", "month", "year"}
-    tr = (time_range or "").strip()
-    # Toleruj wartości często generowane przez narzędzia/LLM: "null", "none", "undefined", "-"
-    if tr.lower() in {"null", "none", "undefined", "-"}:
-        tr = ""
-    if tr:
-        if tr not in allowed_ranges:
-            raise HTTPException(422, f"invalid time_range; allowed: {', '.join(sorted(allowed_ranges))}")
-        params["time_range"] = tr
+    q_effective = f"site:{site_norm} {query}" if site_norm else query
+    params = {"q": q_effective, "format": "json", "pageno": str(page)}
+    if time_range_value:
+        params["time_range"] = time_range_value
     if language:
         params["language"] = language
-    # Parse safesearch accepting numbers and common aliases
-    if safesearch is not None:
-        ss_map = {
-            "0": 0, "off": 0, "none": 0,
-            "1": 1, "moderate": 1, "med": 1,
-            "2": 2, "strict": 2, "safe": 2,
-        }
-        val = ss_map.get(str(safesearch).strip().lower())
-        if val is None:
-            raise HTTPException(422, "invalid safesearch; allowed: 0|1|2 or off|moderate|strict")
-        params["safesearch"] = str(val)
+    if safesearch_value is not None:
+        params["safesearch"] = safesearch_value
 
     url = searx_search_url(SEARXNG_URL)
     try:
@@ -342,33 +390,27 @@ async def search(
     if r.status_code != 200:
         raise HTTPException(r.status_code, f"searxng error: {r.text[:500]}")
 
-    # Use orjson to parse upstream JSON for performance
     try:
         data = orjson.loads(r.content)
     except orjson.JSONDecodeError:
         raise HTTPException(502, f"invalid JSON from upstream: {r.text[:500]}")
-    results = data.get("results", []) or []
 
+    results_raw = data.get("results", []) or []
     items: List[WebItem] = []
-    for hit in results[:limit]:
+    for hit in results_raw[:limit]:
         title = (hit.get("title") or "")[:200]
         url_ = hit.get("url") or ""
         snippet = (hit.get("content") or hit.get("snippet") or "")[:500]
         if url_:
             items.append(WebItem(title=title, url=url_, snippet=snippet))
 
-    next_page = page + 1 if len(results) > limit else None
+    next_page = page + 1 if len(results_raw) > limit else None
 
-    if response is not None:
-        response.headers["X-Tool-Name"] = __title__
-        response.headers["X-Tool-Version"] = __version__
-        response.headers["X-Tool-Source"] = "search"
-
-    # Build a convenience hint to batch-fetch the URLs returned here (optional)
     hint = None
     if SEARCH_SHOW_HINTS:
         try:
             from urllib.parse import quote_plus
+
             urls = [it.url for it in items if it.url]
             if urls:
                 qs = "&".join(f"url={quote_plus(u)}" for u in urls)
@@ -377,11 +419,109 @@ async def search(
         except Exception:
             hint = None
 
-    # Build response payload; omit hint key when hints are disabled
-    payload: Dict[str, object] = {"query": q, "items": items, "next_page": next_page}
-    if SEARCH_SHOW_HINTS and hint:
-        payload["batch_fetch_hint_get"] = hint
-    return payload  # FastAPI will validate against WebResult
+    return WebResult(
+        query=query,
+        items=items,
+        next_page=next_page,
+        batch_fetch_hint_get=hint if hint else None,
+    )
+
+
+@app.get(
+    "/search",
+    response_model=Union[WebResult, BatchSearchResponse],
+    response_model_exclude={"batch_fetch_hint_get"} if not SEARCH_SHOW_HINTS else set(),
+    operation_id="search",
+)
+async def search(
+    q: List[str] = Query(..., description="Search query (repeat ?q=... for batch mode)"),
+    site: Optional[str] = Query(None, description="Limit to domain, e.g. example.com (values 'null'/'none'/'undefined' treated as empty)"),
+    time_range: Optional[str] = Query(
+        None,
+        description="Time filter: day|week|month|year",
+    ),
+    page: int = Query(1, ge=1, description="Results page number (>=1)"),
+    limit: int = Query(5, ge=1, le=20, description="Maximum number of results (1-20)"),
+    language: Optional[str] = Query(None, description="Preferred language, e.g. en, pl, de"),
+    safesearch: Optional[str] = Query(
+        None,
+        description="Safe search level: 0|1|2 or off|moderate|strict",
+        example="moderate",
+    ),
+    response: Response = None,
+):
+    if client is None:
+        raise HTTPException(503, "client not ready")
+
+    queries = _expand_query_values(q)
+    if not queries:
+        raise HTTPException(422, "no queries provided in 'q' parameter")
+    for item in queries:
+        if len(item) < 2:
+            raise HTTPException(422, "each query must be at least 2 characters")
+
+    site_norm = _normalize_site(site)
+    time_range_value = _normalize_time_range(time_range)
+    safesearch_value = _parse_safesearch(safesearch)
+
+    async def _run(single_query: str):
+        try:
+            result = await _execute_search_query(
+                query=single_query,
+                site_norm=site_norm,
+                time_range_value=time_range_value,
+                page=page,
+                limit=limit,
+                language=language,
+                safesearch_value=safesearch_value,
+            )
+            return single_query, result, None
+        except HTTPException as he:
+            return single_query, None, he
+        except Exception as exc:
+            return single_query, None, exc
+
+    concurrency = max(1, min(len(queries), 8))
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _bounded(single_query: str):
+        async with sem:
+            return await _run(single_query)
+
+    tasks = [_bounded(query_text) for query_text in queries]
+    execution = await asyncio.gather(*tasks)
+
+    results: List[WebResult] = []
+    errors: Dict[str, str] = {}
+    raw_errors: Dict[str, Exception] = {}
+    for query_text, res, err in execution:
+        if res is not None:
+            results.append(res)
+        else:
+            raw_errors[query_text] = err if err else Exception("unknown error")
+            if isinstance(err, HTTPException):
+                errors[query_text] = f"{err.status_code}: {err.detail}"
+            else:
+                errors[query_text] = str(err)
+
+    if response is not None:
+        response.headers["X-Tool-Name"] = __title__
+        response.headers["X-Tool-Version"] = __version__
+        response.headers["X-Tool-Source"] = "search"
+        response.headers["X-Query-Count"] = str(len(queries))
+
+    if len(queries) == 1:
+        single_query = queries[0]
+        if single_query in raw_errors:
+            err = raw_errors[single_query]
+            if isinstance(err, HTTPException):
+                raise err
+            raise HTTPException(500, str(err))
+        if results:
+            return _serialize_webresult(results[0])
+
+    serialized_results = [_serialize_webresult(res) for res in results]
+    return BatchSearchResponse(results=serialized_results, errors=errors)
 
 async def _fetch_one(url: str, max_chars: int) -> FetchResult:
     truncated = False
@@ -430,21 +570,23 @@ async def _fetch_one(url: str, max_chars: int) -> FetchResult:
         except Exception:
             return "", {"title": None, "author": None, "date": None}
 
-    traf_md, traf_meta = await _run_trafilatura()
+    # Quick readability pass first; only escalate to Trafilatura if the output looks weak.
     read_md, read_meta = await _run_readability()
-
-    sc_traf = score_markdown(traf_md)
     sc_read = score_markdown(read_md)
 
-    if sc_traf >= max(sc_read, MIN_OUTPUT_CHARS):
-        chosen_md, chosen_meta, chosen_source = traf_md, traf_meta, "trafilatura"
-    elif sc_read >= max(sc_traf, MIN_OUTPUT_CHARS):
-        chosen_md, chosen_meta, chosen_source = read_md, read_meta, "readability"
-    else:
+    chosen_md = read_md
+    chosen_meta = read_meta
+    chosen_source = "readability"
+
+    traf_md = ""
+    traf_meta: Dict[str, Optional[str]] = {"title": None, "author": None, "date": None}
+    sc_traf = 0
+
+    if sc_read < MIN_OUTPUT_CHARS:
+        traf_md, traf_meta = await _run_trafilatura()
+        sc_traf = score_markdown(traf_md)
         if sc_traf >= sc_read:
             chosen_md, chosen_meta, chosen_source = traf_md, traf_meta, "trafilatura"
-        else:
-            chosen_md, chosen_meta, chosen_source = read_md, read_meta, "readability"
 
     if not chosen_md:
         # Robust fallbacks: try full-article readability, then markdownify whole HTML
@@ -490,23 +632,23 @@ async def _fetch_one(url: str, max_chars: int) -> FetchResult:
     
     "/fetch",
     response_model=FetchResponse,
-    summary="Pobierz treść z jednego lub wielu URLi (GET)",
+    summary="Fetch content from one or more URLs (GET)",
     description=(
-        "Powtarzaj parametr url wiele razy lub użyj jednej wartości będącej listą JSON. "
-        "Dla >1 URL działa równolegle. Concurrency: 1-20 (domyślnie min(8, n))."
+        "Repeat the url parameter multiple times or pass a single JSON list value. "
+        "For more than one URL the tool runs requests in parallel. Concurrency: 1-20 (default min(8, n))."
     ),
     operation_id="fetch_get",
 )
 async def fetch_get(
-    url: List[str] = Query(..., description="Powtarzalny parametr ?url=... dla wielu adresów. Akceptuje też jedną wartość będącą JSON listą."),
-    max_chars: int = Query(8000, ge=500, le=1000000, description="Limit znaków Markdown"),
-    concurrency: Optional[int] = Query(None, ge=1, le=20, description="Współbieżność 1-20; domyślnie min(8,len(url))"),
+    url: List[str] = Query(..., description="Repeatable ?url=... parameter for multiple addresses. Accepts one value that is a JSON list."),
+    max_chars: int = Query(8000, ge=500, le=1000000, description="Markdown character limit"),
+    concurrency: Optional[int] = Query(None, ge=1, le=20, description="Concurrency 1-20; default min(8, len(url))"),
     response: Response = None,
 ):
     if client is None:
         raise HTTPException(503, "client not ready")
 
-    # Znormalizuj url: dopuszczamy formaty: powtarzany parametr, lista JSON w jednym parametrze, oraz CSV
+    # Normalize url values: repeated parameters, JSON list in a single parameter, and CSV-like strings
     normalized: List[str] = []
     for u in url:
         s = (u or '').strip()
@@ -564,10 +706,10 @@ async def fetch_get(
     
     "/fetch",
     response_model=FetchResponse,
-    summary="Pobierz treść z jednego lub wielu URLi (POST)",
+    summary="Fetch content from one or more URLs (POST)",
     description=(
-        "Body JSON: {url: string|array, urls: array}. Dla >1 URL działa równolegle. "
-        "Concurrency 1-20; domyślnie min(8, n)."
+        "JSON body: {url: string|array, urls: array}. For multiple URLs requests run in parallel. "
+        "Concurrency 1-20; default min(8, n)."
     ),
     operation_id="fetch_post",
 )
