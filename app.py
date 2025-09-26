@@ -4,7 +4,7 @@ SearXNG OpenAPI Tool
 
 - Autor: Seweryn Sitarski, Kat (asysta kodowa)
 - Kontakt: seweryn.sitarski@gmail.com
-- Wersja: 0.6.0
+- Wersja: 0.7.1
 - Licencja: MIT
 - URL projektu: https://example.local/searxng-openapi-tool
 
@@ -45,7 +45,7 @@ from readability.readability import Document
 from markdownify import markdownify as md
 
 __title__ = "searxng-openapi-tool"
-__version__ = "0.6.0"
+__version__ = "0.7.1"
 __author__ = "Seweryn Sitarski, Kat"
 __license__ = "MIT"
 __contact__ = "seweryn.sitarski@gmail.com"
@@ -74,6 +74,9 @@ EXTRACT_TIMEOUT_S = float(os.environ.get("EXTRACT_TIMEOUT_S", "6.0"))
 SEARCH_SHOW_HINTS = (
     os.environ.get("SEARCH_SHOW_HINTS", "0").strip().lower() in {"1", "true", "yes", "on"}
 )
+INCLUDE_EXCERPT = (
+    os.environ.get("INCLUDE_EXCERPT", "0").strip().lower() in {"1", "true", "yes", "on"}
+)
 
 client: Optional[httpx.AsyncClient] = None
 
@@ -95,10 +98,14 @@ class BatchSearchResponse(BaseModel):
     errors: Dict[str, str] = Field(default_factory=dict)
 
 class FetchResult(BaseModel):
+    model_config = ConfigDict(ser_json_exclude_none=True)
     url: str
     title: Optional[str]
     content_markdown: str
-    excerpt: Optional[str] = None
+    excerpt: Optional[str] = Field(
+        default=None,
+        description="Short excerpt (<=400 chars) returned only when INCLUDE_EXCERPT admin flag is true",
+    )
     author: Optional[str] = None
     date: Optional[str] = None
     content_type: Optional[str] = None
@@ -341,6 +348,7 @@ async def about():
             "ACCEPT_LANGUAGE": ACCEPT_LANG,
             "USER_AGENT": USER_AGENT,
             "SEARCH_SHOW_HINTS": str(SEARCH_SHOW_HINTS),
+            "INCLUDE_EXCERPT": str(INCLUDE_EXCERPT),
         },
         openapi_url="/openapi.json",
         docs_url="/docs",
@@ -554,7 +562,7 @@ async def _fetch_one(url: str, max_chars: int) -> FetchResult:
             url=url,
             title=None,
             content_markdown=text,
-            excerpt=text[:400] if text else None,
+            excerpt=text[:400] if INCLUDE_EXCERPT and text else None,
             author=None,
             date=None,
             content_type=ctype,
@@ -625,7 +633,7 @@ async def _fetch_one(url: str, max_chars: int) -> FetchResult:
         url=url,
         title=title,
         content_markdown=content,
-        excerpt=content[:400],
+        excerpt=content[:400] if INCLUDE_EXCERPT and content else None,
         author=author,
         date=date,
         content_type=ctype,
@@ -637,10 +645,12 @@ async def _fetch_one(url: str, max_chars: int) -> FetchResult:
     
     "/fetch",
     response_model=FetchResponse,
+    response_model_exclude_none=True,
     summary="Fetch content from one or more URLs (GET)",
     description=(
         "Repeat the url parameter multiple times or pass a single JSON list value. "
-        "For more than one URL the tool runs requests in parallel. Concurrency: 1-20 (default min(8, n))."
+        "For more than one URL the tool runs requests in parallel. Concurrency: 1-20 (default min(8, n)). "
+        "Administrator can enable INCLUDE_EXCERPT=1 to add short summaries; default is disabled to save model context."
     ),
     operation_id="fetch_get",
 )
@@ -711,10 +721,11 @@ async def fetch_get(
     
     "/fetch",
     response_model=FetchResponse,
+    response_model_exclude_none=True,
     summary="Fetch content from one or more URLs (POST)",
     description=(
         "JSON body: {url: string|array, urls: array}. For multiple URLs requests run in parallel. "
-        "Concurrency 1-20; default min(8, n)."
+        "Concurrency 1-20; default min(8, n). Short summaries appear only when admin sets INCLUDE_EXCERPT=1."
     ),
     operation_id="fetch_post",
 )

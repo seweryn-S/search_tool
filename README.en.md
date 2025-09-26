@@ -3,11 +3,12 @@
 A minimal HTTP service (FastAPI) that combines SearXNG search with web content extraction (Trafilatura + Readability) using an ensemble approach. Designed as a tool for OpenWebUI / OpenAI Tools, but works standalone as well.
 
 - Author: Seweryn Sitarski, Kat (coding assistance)
-- Version: 0.4.1
+- Version: 0.7.1
 - License: MIT
 
 ## Features
 - SearXNG search with pagination, time filter, and safesearch.
+- Batch search: repeatable `q` lets you issue several queries concurrently in one call.
 - Parallel fetching and extraction of content from multiple URLs.
 - Two-step extraction: Trafilatura and Readability (selects the better result + safe fallbacks).
 - Simple test interface at `/ui` and OpenAPI docs at `/docs`.
@@ -16,7 +17,7 @@ A minimal HTTP service (FastAPI) that combines SearXNG search with web content e
 ## Endpoints
 - `GET /health`: Quick service status.
 - `GET /about`: Tool metadata, version, usage examples, environment exposure.
-- `GET /search`: SearXNG search. Params: `q`, `site`, `time_range=day|week|month|year`, `page`, `limit`, `language`, `safesearch=0|1|2|off|moderate|strict`.
+- `GET /search`: SearXNG search. Parameters: repeatable `q` (min 2 chars, JSON list accepted), `site`, `time_range=day|week|month|year`, `page`, `limit` (per-query cap), `language`, `safesearch=0|1|2|off|moderate|strict`.
 - `GET /fetch`: Fetch and extract one or many URLs via repeated `url` parameters + `max_chars`, `concurrency`.
 - `POST /fetch`: Fetch and extract via JSON body: `{ url: string|array, urls: array, max_chars, concurrency }`.
 - `GET /ui`: Simple manual testing UI (excluded from OpenAPI schema).
@@ -34,6 +35,7 @@ OpenAPI JSON: `http://localhost:7000/openapi.json`
 - `HARD_MAX_CHARS` (default `40000`): Hard limit of characters in returned Markdown.
 - `EXTRACT_TIMEOUT_S` (default `6.0`): Single extraction timeout.
 - `SEARCH_SHOW_HINTS` (`0/1`, default `0`): Whether `/search` adds a batch `/fetch` hint.
+- `INCLUDE_EXCERPT` (`0/1`, default `0`): Enables returning the `excerpt` snippet in `/fetch` responses when set by the administrator.
 
 The full list with current values is available at `GET /about`.
 
@@ -141,9 +143,9 @@ curl -sS "http://localhost:7000/fetch?url=https://example.com&url=https://httpbi
 - Do not expose publicly without basic protections (rate limiting, reverse proxy, ACL, TLS).
 - Set a valid `SEARXNG_URL` — otherwise `/search` will report an upstream error.
 - The HTTP client sets `User-Agent` and `Accept-Language`; adjust them to your org policies.
+- The `/fetch` `excerpt` field is disabled by default; set `INCLUDE_EXCERPT=1` only when you really need summaries (saves LLM context).
 
 ## Info
 - Repository contains: `app.py`, `Dockerfile`, `docker-compose.yaml`, `deploy/` (systemd units and defaults).
 - Author/contact: `seweryn.sitarski@gmail.com`
 - License: MIT
-

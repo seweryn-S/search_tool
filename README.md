@@ -3,11 +3,12 @@
 Minimalny serwis HTTP (FastAPI) łączący wyszukiwanie SearXNG z ekstrakcją treści stron (Trafilatura + Readability) w podejściu „ensemble”. Zaprojektowany jako narzędzie dla OpenWebUI / OpenAI Tools, ale działa też samodzielnie.
 
 - Autor: Seweryn Sitarski, Kat (asysta kodowa)
-- Wersja: 0.4.1
+- Wersja: 0.7.1
 - Licencja: MIT
 
 ## Funkcje
 - Wyszukiwanie w SearXNG z paginacją, filtrem czasu i „safesearch”.
+- Batch search: powtarzalne `q` pozwala wykonać wiele zapytań równolegle w ramach jednego wywołania.
 - Równoległe pobieranie i ekstrakcja treści wielu adresów URL.
 - Dwustopniowa ekstrakcja: Trafilatura i Readability (wybór lepszego wyniku + bezpieczne fallbacki).
 - Prosty interfejs testowy pod `/ui` oraz dokumentacja OpenAPI pod `/docs`.
@@ -16,7 +17,7 @@ Minimalny serwis HTTP (FastAPI) łączący wyszukiwanie SearXNG z ekstrakcją tr
 ## Endpointy
 - `GET /health`: Szybki status usługi.
 - `GET /about`: Metadane narzędzia, wersja, przykłady użycia, ekspozycja zmiennych środowiska.
-- `GET /search`: Wyszukiwanie z SearXNG. Parametry: `q`, `site`, `time_range=day|week|month|year`, `page`, `limit`, `language`, `safesearch=0|1|2|off|moderate|strict`.
+- `GET /search`: Wyszukiwanie z SearXNG. Parametry: powtarzalne `q` (min. 2 znaki, wspiera listy JSON), `site`, `time_range=day|week|month|year`, `page`, `limit` (limit per zapytanie), `language`, `safesearch=0|1|2|off|moderate|strict`.
 - `GET /fetch`: Pobieranie i ekstrakcja jednego lub wielu URL-i przez parametry `url` (można powtórzyć wiele razy) + `max_chars`, `concurrency`.
 - `POST /fetch`: Pobieranie i ekstrakcja przez body JSON: `{ url: string|array, urls: array, max_chars, concurrency }`.
 - `GET /ui`: Proste UI do ręcznego testowania (poza schematem OpenAPI).
@@ -34,6 +35,7 @@ OpenAPI JSON: `http://localhost:7000/openapi.json`
 - `HARD_MAX_CHARS` (domyślnie `40000`): Twardy limit znaków w zwracanym Markdown.
 - `EXTRACT_TIMEOUT_S` (domyślnie `6.0`): Timeout pojedynczej ekstrakcji.
 - `SEARCH_SHOW_HINTS` (`0/1`, domyślnie `0`): Czy dodać w `/search` podpowiedź do masowego `/fetch`.
+- `INCLUDE_EXCERPT` (`0/1`, domyślnie `0`): Włącza globalnie zwracanie pola `excerpt` (skrót treści) w odpowiedziach `/fetch`.
 
 Pełna lista wraz z bieżącymi wartościami jest dostępna pod `GET /about`.
 
@@ -141,9 +143,9 @@ Katalog `deploy/` zawiera dwa warianty jednostek systemd oraz plik środowiskowy
 - Nie wystawiaj publicznie bez podstawowych zabezpieczeń (rate limiting, reverse proxy, ACL, TLS).
 - Ustaw prawidłowy `SEARXNG_URL` – bez tego `/search` zwróci błąd upstream.
 - Klient HTTP używa nagłówków `User-Agent` i `Accept-Language`; dostosuj je do polityk Twojej organizacji.
+- Skrót `excerpt` w `/fetch` jest wyłączony domyślnie; włącz `INCLUDE_EXCERPT=1` tylko gdy faktycznie potrzebujesz streszczeń (oszczędza to kontekst modeli LLM).
 
 ## Informacje
 - Repozytorium zawiera: `app.py`, `Dockerfile`, `docker-compose.yaml`, `deploy/` (jednostki systemd i domyślne środowisko).
 - Autor/kontakt: `seweryn.sitarski@gmail.com`
 - Licencja: MIT
-
