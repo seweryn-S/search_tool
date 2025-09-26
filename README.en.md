@@ -3,7 +3,7 @@
 A minimal HTTP service (FastAPI) that combines SearXNG search with web content extraction (Trafilatura + Readability) using an ensemble approach. Designed as a tool for OpenWebUI / OpenAI Tools, but works standalone as well.
 
 - Author: Seweryn Sitarski, Kat (coding assistance)
-- Version: 0.7.1
+- Version: 0.7.2
 - License: MIT
 
 ## Features

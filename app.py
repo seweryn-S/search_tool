@@ -4,7 +4,7 @@ SearXNG OpenAPI Tool
 
 - Autor: Seweryn Sitarski, Kat (asysta kodowa)
 - Kontakt: seweryn.sitarski@gmail.com
-- Wersja: 0.7.1
+- Wersja: 0.7.2
 - Licencja: MIT
 - URL projektu: https://example.local/searxng-openapi-tool
 
@@ -45,7 +45,7 @@ from readability.readability import Document
 from markdownify import markdownify as md
 
 __title__ = "searxng-openapi-tool"
-__version__ = "0.7.1"
+__version__ = "0.7.2"
 __author__ = "Seweryn Sitarski, Kat"
 __license__ = "MIT"
 __contact__ = "seweryn.sitarski@gmail.com"
@@ -641,6 +641,46 @@ async def _fetch_one(url: str, max_chars: int) -> FetchResult:
     )
 
 
+async def _process_fetch_request(
+    urls: List[str],
+    max_chars: int,
+    requested_concurrency: Optional[int],
+    response: Optional[Response],
+    empty_error: str,
+) -> FetchResponse:
+    if not urls:
+        raise HTTPException(422, empty_error)
+
+    auto_c = min(8, max(1, len(urls)))
+    chosen_c = requested_concurrency if (requested_concurrency and requested_concurrency > 0) else auto_c
+    chosen_c = max(1, min(chosen_c, 20))
+
+    sem = asyncio.Semaphore(chosen_c)
+    results: List[FetchResult] = []
+    errors: Dict[str, str] = {}
+
+    async def _one(u: str):
+        nonlocal results, errors
+        async with sem:
+            try:
+                res = await _fetch_one(u, max_chars)
+                results.append(res)
+            except HTTPException as he:
+                errors[u] = f"{he.status_code}: {he.detail}"
+            except Exception as e:
+                errors[u] = str(e)
+
+    await asyncio.gather(*[_one(u) for u in urls])
+
+    if response is not None:
+        response.headers["X-Tool-Name"] = __title__
+        response.headers["X-Tool-Version"] = __version__
+        response.headers["X-Tool-Source"] = "fetch"
+        response.headers["X-Concurrency"] = str(chosen_c)
+
+    return FetchResponse(results=results, errors=errors)
+
+
 @app.get(
     
     "/fetch",
@@ -685,36 +725,13 @@ async def fetch_get(
                     pass
         normalized.append(s.strip().strip('"\''))
 
-    if not normalized:
-        raise HTTPException(422, "no valid URLs provided in 'url' parameter")
-
-    auto_c = min(8, max(1, len(normalized)))
-    chosen_c = concurrency if (concurrency and concurrency > 0) else auto_c
-    chosen_c = max(1, min(chosen_c, 20))
-    sem = asyncio.Semaphore(chosen_c)
-    results: List[FetchResult] = []
-    errors: Dict[str, str] = {}
-
-    async def _one(u: str):
-        nonlocal results, errors
-        async with sem:
-            try:
-                res = await _fetch_one(u, max_chars)
-                results.append(res)
-            except HTTPException as he:
-                errors[u] = f"{he.status_code}: {he.detail}"
-            except Exception as e:
-                errors[u] = str(e)
-
-    await asyncio.gather(*[_one(u) for u in normalized])
-
-    if response is not None:
-        response.headers["X-Tool-Name"] = __title__
-        response.headers["X-Tool-Version"] = __version__
-        response.headers["X-Tool-Source"] = "fetch"
-        response.headers["X-Concurrency"] = str(chosen_c)
-
-    return FetchResponse(results=results, errors=errors)
+    return await _process_fetch_request(
+        normalized,
+        max_chars,
+        concurrency,
+        response,
+        "no valid URLs provided in 'url' parameter",
+    )
 
 
 @app.post(
@@ -757,36 +774,13 @@ async def fetch_post(request: FetchRequest, response: Response = None):
                         req_urls.append(s)
             elif s:
                 req_urls.append(s)
-    if not req_urls:
-        raise HTTPException(422, "no URLs provided: use 'url' or 'urls'")
-
-    auto_c = min(8, max(1, len(req_urls)))
-    chosen_c = request.concurrency if (request.concurrency and request.concurrency > 0) else auto_c
-    chosen_c = max(1, min(chosen_c, 20))
-    sem = asyncio.Semaphore(chosen_c)
-    results: List[FetchResult] = []
-    errors: Dict[str, str] = {}
-
-    async def _one(u: str):
-        nonlocal results, errors
-        async with sem:
-            try:
-                res = await _fetch_one(u, request.max_chars)
-                results.append(res)
-            except HTTPException as he:
-                errors[u] = f"{he.status_code}: {he.detail}"
-            except Exception as e:
-                errors[u] = str(e)
-
-    await asyncio.gather(*[_one(u) for u in req_urls])
-
-    if response is not None:
-        response.headers["X-Tool-Name"] = __title__
-        response.headers["X-Tool-Version"] = __version__
-        response.headers["X-Tool-Source"] = "fetch"
-        response.headers["X-Concurrency"] = str(chosen_c)
-
-    return FetchResponse(results=results, errors=errors)
+    return await _process_fetch_request(
+        req_urls,
+        request.max_chars,
+        request.concurrency,
+        response,
+        "no URLs provided: use 'url' or 'urls'",
+    )
 
 
 @app.get("/ui", response_class=HTMLResponse, include_in_schema=False)
