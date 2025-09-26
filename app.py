@@ -441,7 +441,12 @@ async def search(
         description="Time filter: day|week|month|year",
     ),
     page: int = Query(1, ge=1, description="Results page number (>=1)"),
-    limit: int = Query(5, ge=1, le=20, description="Maximum number of results (1-20)"),
+    limit: int = Query(
+        5,
+        ge=1,
+        le=20,
+        description="Maximum number of results per query (1-20); in batch mode each query receives up to this many items",
+    ),
     language: Optional[str] = Query(None, description="Preferred language, e.g. en, pl, de"),
     safesearch: Optional[str] = Query(
         None,
