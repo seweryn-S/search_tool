@@ -2,8 +2,8 @@
 # Copy to: /etc/default/searxng-openapi-tool
 
 # --- App environment (passed into container) ---
-# Upstream SearXNG endpoint
-SEARXNG_URL=http://localhost:7000
+# Upstream SearXNG endpoint (align with app default)
+SEARXNG_URL=http://localhost:8080
 
 # HTTP client tuning
 TIMEOUT_S=5.0
@@ -17,9 +17,8 @@ EXTRACT_TIMEOUT_S=6.0
 # Show batch-fetch hint in /search results (0/1; default 0)
 SEARCH_SHOW_HINTS=0
 
-# Locale / UA
+# Locale
 ACCEPT_LANGUAGE=pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7
-USER_AGENT=Mozilla/5.0 (compatible; searxng-openapi-tool/0.4.1)
 
 # --- For systemd unit variant: Docker Compose ---
 # Directory containing docker-compose.yaml (project root)

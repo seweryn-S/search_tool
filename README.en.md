@@ -3,7 +3,7 @@
 A minimal HTTP service (FastAPI) that combines SearXNG search with web content extraction (Trafilatura + Readability) using an ensemble approach. Designed as a tool for OpenWebUI / OpenAI Tools, but works standalone as well.
 
 - Author: Seweryn Sitarski, Kat (coding assistance)
-- Version: 0.7.2
+- Version: 0.8.0
 - License: MIT
 
 ## Features
@@ -13,6 +13,7 @@ A minimal HTTP service (FastAPI) that combines SearXNG search with web content e
 - Two-step extraction: Trafilatura and Readability (selects the better result + safe fallbacks).
 - Simple test interface at `/ui` and OpenAPI docs at `/docs`.
 - Low latency: HTTP/2, `httpx` client, connection and timeout limits.
+- User-Agent rotation: each request uses a random, realistic browser UA (desktop/mobile) to reduce blocking by target sites.
 
 ## Endpoints
 - `GET /health`: Quick service status.
@@ -30,7 +31,7 @@ OpenAPI JSON: `http://localhost:7000/openapi.json`
 - `TIMEOUT_S` (default `3.0`): HTTP upstream request timeout.
 - `MAX_CONN` / `MAX_KEEP` (default `200` / `100`): HTTP client connection limits.
 - `ACCEPT_LANGUAGE` (default `pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7`): Preferred language.
-- `USER_AGENT` (default `Mozilla/5.0 (compatible; searxng-openapi-tool/...)`).
+- UA note: the tool rotates User-Agent per request from a realistic pool; there is no environment variable to force a fixed UA.
 - `MIN_OUTPUT_CHARS` (default `200`): Minimum content “density” to favour an extractor.
 - `HARD_MAX_CHARS` (default `40000`): Hard limit of characters in returned Markdown.
 - `EXTRACT_TIMEOUT_S` (default `6.0`): Single extraction timeout.
@@ -142,7 +143,7 @@ curl -sS "http://localhost:7000/fetch?url=https://example.com&url=https://httpbi
 ## Notes and best practices
 - Do not expose publicly without basic protections (rate limiting, reverse proxy, ACL, TLS).
 - Set a valid `SEARXNG_URL` — otherwise `/search` will report an upstream error.
-- The HTTP client sets `User-Agent` and `Accept-Language`; adjust them to your org policies.
+- The HTTP client uses a rotating `User-Agent` and sets `Accept-Language`; adjust `ACCEPT_LANGUAGE` to your org policies.
 - The `/fetch` `excerpt` field is disabled by default; set `INCLUDE_EXCERPT=1` only when you really need summaries (saves LLM context).
 
 ## Info

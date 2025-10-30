@@ -4,7 +4,7 @@ SearXNG OpenAPI Tool
 
 - Autor: Seweryn Sitarski, Kat (asysta kodowa)
 - Kontakt: seweryn.sitarski@gmail.com
-- Wersja: 0.7.2
+- Wersja: 0.8.0
 - Licencja: MIT
 - URL projektu: https://example.local/searxng-openapi-tool
 
@@ -36,6 +36,7 @@ import orjson
 import ast
 import os
 import re
+import random
 
 import trafilatura
 from trafilatura.settings import use_config
@@ -45,7 +46,7 @@ from readability.readability import Document
 from markdownify import markdownify as md
 
 __title__ = "searxng-openapi-tool"
-__version__ = "0.7.2"
+__version__ = "0.8.0"
 __author__ = "Seweryn Sitarski, Kat"
 __license__ = "MIT"
 __contact__ = "seweryn.sitarski@gmail.com"
@@ -63,10 +64,6 @@ SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://localhost:8080")
 TIMEOUT_S = float(os.environ.get("TIMEOUT_S", "3.0"))
 MAX_CONN = int(os.environ.get("MAX_CONN", "200"))
 MAX_KEEP = int(os.environ.get("MAX_KEEP", "100"))
-USER_AGENT = os.environ.get(
-    "USER_AGENT",
-    f"Mozilla/5.0 (compatible; {__title__}/{__version__})"
-)
 ACCEPT_LANG = os.environ.get("ACCEPT_LANGUAGE", "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7")
 MIN_OUTPUT_CHARS = int(os.environ.get("MIN_OUTPUT_CHARS", "200"))
 HARD_MAX_CHARS = int(os.environ.get("HARD_MAX_CHARS", "40000"))
@@ -79,6 +76,40 @@ INCLUDE_EXCERPT = (
 )
 
 client: Optional[httpx.AsyncClient] = None
+
+# --- User-Agent rotation ---
+# A small pool of realistic desktop and mobile browser User-Agent strings.
+UA_POOL: List[str] = [
+    # Safari (macOS)
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15",
+    # Firefox (Linux/Windows)
+    "Mozilla/5.0 (X11; Linux x86_64; rv:130.0) Gecko/20100101 Firefox/130.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:130.0) Gecko/20100101 Firefox/130.0",
+    # Chrome (Windows/macOS/Linux)
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.6668.70 Safari/537.36",
+    # Edge (Windows)
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.6668.100 Safari/537.36 Edg/129.0.2792.89",
+    # Mobile Safari (iOS)
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_6_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPad; CPU OS 17_6_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1",
+    # Chrome (Android)
+    "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 14; SM-S921B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.6668.60 Mobile Safari/537.36",
+    # Additional examples from request
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+]
+
+_rand = random.SystemRandom()
+
+def choose_user_agent() -> str:
+    try:
+        return _rand.choice(UA_POOL)
+    except Exception:
+        # Fallback to the first entry in the pool as a last resort.
+        return UA_POOL[0]
 
 # --- Modele ---
 class WebItem(BaseModel):
@@ -153,7 +184,6 @@ async def _startup():
         limits=httpx.Limits(max_connections=MAX_CONN, max_keepalive_connections=MAX_KEEP),
         headers={
             "Accept": "application/json",
-            "User-Agent": USER_AGENT,
             "Accept-Language": ACCEPT_LANG,
             "Accept-Encoding": "gzip, deflate, br",
         },
@@ -346,7 +376,6 @@ async def about():
             "MIN_OUTPUT_CHARS": str(MIN_OUTPUT_CHARS),
             "EXTRACT_TIMEOUT_S": str(EXTRACT_TIMEOUT_S),
             "ACCEPT_LANGUAGE": ACCEPT_LANG,
-            "USER_AGENT": USER_AGENT,
             "SEARCH_SHOW_HINTS": str(SEARCH_SHOW_HINTS),
             "INCLUDE_EXCERPT": str(INCLUDE_EXCERPT),
         },
@@ -391,7 +420,11 @@ async def _execute_search_query(
 
     url = searx_search_url(SEARXNG_URL)
     try:
-        r = await client.get(url, params=params)
+        r = await client.get(
+            url,
+            params=params,
+            headers={"User-Agent": choose_user_agent()},
+        )
     except httpx.RequestError as e:
         raise HTTPException(502, f"search upstream error: {e}") from e
 
@@ -543,7 +576,7 @@ async def _fetch_one(url: str, max_chars: int) -> FetchResult:
         truncated = True
 
     headers = {
-        "User-Agent": USER_AGENT,
+        "User-Agent": choose_user_agent(),
         "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
         "Accept-Language": ACCEPT_LANG,
         "Accept-Encoding": "gzip, deflate, br",

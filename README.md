@@ -3,7 +3,7 @@
 Minimalny serwis HTTP (FastAPI) łączący wyszukiwanie SearXNG z ekstrakcją treści stron (Trafilatura + Readability) w podejściu „ensemble”. Zaprojektowany jako narzędzie dla OpenWebUI / OpenAI Tools, ale działa też samodzielnie.
 
 - Autor: Seweryn Sitarski, Kat (asysta kodowa)
-- Wersja: 0.7.2
+- Wersja: 0.8.0
 - Licencja: MIT
 
 ## Funkcje
@@ -13,6 +13,7 @@ Minimalny serwis HTTP (FastAPI) łączący wyszukiwanie SearXNG z ekstrakcją tr
 - Dwustopniowa ekstrakcja: Trafilatura i Readability (wybór lepszego wyniku + bezpieczne fallbacki).
 - Prosty interfejs testowy pod `/ui` oraz dokumentacja OpenAPI pod `/docs`.
 - Niskie opóźnienia: HTTP/2, klient `httpx`, limity połączeń i czasu.
+- Rotacja User-Agent: każde żądanie używa losowego, realistycznego nagłówka przeglądarki (desktop/mobile), co pomaga ograniczać blokady po stronie serwisów.
 
 ## Endpointy
 - `GET /health`: Szybki status usługi.
@@ -30,7 +31,7 @@ OpenAPI JSON: `http://localhost:7000/openapi.json`
 - `TIMEOUT_S` (domyślnie `3.0`): Limit czasu zapytań HTTP do upstreamów.
 - `MAX_CONN` / `MAX_KEEP` (domyślnie `200` / `100`): Limity połączeń dla klienta HTTP.
 - `ACCEPT_LANGUAGE` (domyślnie `pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7`): Preferencja języka.
-- `USER_AGENT` (domyślnie `Mozilla/5.0 (compatible; searxng-openapi-tool/...)`).
+- Uwaga dot. UA: narzędzie losuje nagłówki User-Agent per żądanie z puli realistycznych UA; brak zmiennej środowiskowej do wymuszania stałego UA.
 - `MIN_OUTPUT_CHARS` (domyślnie `200`): Minimalna „gęstość” treści do preferowania ekstraktora.
 - `HARD_MAX_CHARS` (domyślnie `40000`): Twardy limit znaków w zwracanym Markdown.
 - `EXTRACT_TIMEOUT_S` (domyślnie `6.0`): Timeout pojedynczej ekstrakcji.
@@ -142,7 +143,7 @@ Katalog `deploy/` zawiera dwa warianty jednostek systemd oraz plik środowiskowy
 ## Uwagi i dobre praktyki
 - Nie wystawiaj publicznie bez podstawowych zabezpieczeń (rate limiting, reverse proxy, ACL, TLS).
 - Ustaw prawidłowy `SEARXNG_URL` – bez tego `/search` zwróci błąd upstream.
-- Klient HTTP używa nagłówków `User-Agent` i `Accept-Language`; dostosuj je do polityk Twojej organizacji.
+- Klient HTTP używa losowego `User-Agent` i nagłówka `Accept-Language`; dostosuj `ACCEPT_LANGUAGE` do polityk Twojej organizacji.
 - Skrót `excerpt` w `/fetch` jest wyłączony domyślnie; włącz `INCLUDE_EXCERPT=1` tylko gdy faktycznie potrzebujesz streszczeń (oszczędza to kontekst modeli LLM).
 
 ## Informacje
