@@ -9,7 +9,8 @@ SearXNG OpenAPI Tool
 - URL projektu: https://example.local/searxng-openapi-tool
 
 Opis:
-Minimalny tool HTTP dla OpenWebUI / OpenAI Tools, łączący wyszukiwanie SearXNG
+Minimalny tool HTTP dla OpenWebUI / OpenAI Tools, łączący wyszukiwanie
+(SearXNG lub biblioteka ddgs — przełącznik parametrem `source` / env SEARCH_SOURCE)
 oraz ekstrakcję treści (Trafilatura + Readability) w układzie ensemble.
 
 Dobre praktyki:
@@ -44,9 +45,10 @@ from trafilatura.settings import use_config
 # Readability (python-readability / readability-lxml)
 from readability.readability import Document
 from markdownify import markdownify as md
+from ddgs import DDGS
 
 __title__ = "searxng-openapi-tool"
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 __author__ = "Seweryn Sitarski, Kat"
 __license__ = "MIT"
 __contact__ = "seweryn.sitarski@gmail.com"
@@ -61,6 +63,8 @@ app = FastAPI(
 
 # --- Konfiguracja środowiska ---
 SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://localhost:8080")
+# Źródło wyszukiwania: "searxng" (wymaga instancji SearXNG) lub "ddgs" (biblioteka, bez upstreamu)
+SEARCH_SOURCE = os.environ.get("SEARCH_SOURCE", "ddgs").strip().lower()
 TIMEOUT_S = float(os.environ.get("TIMEOUT_S", "3.0"))
 MAX_CONN = int(os.environ.get("MAX_CONN", "200"))
 MAX_KEEP = int(os.environ.get("MAX_KEEP", "100"))
@@ -368,6 +372,7 @@ async def about():
         contact=__contact__,
         endpoints=["/health", "/search", "/fetch", "/about", "/ui"],
         env={
+            "SEARCH_SOURCE": SEARCH_SOURCE,
             "SEARXNG_URL": SEARXNG_URL,
             "TIMEOUT_S": str(TIMEOUT_S),
             "MAX_CONN": str(MAX_CONN),
@@ -398,6 +403,37 @@ async def health():
     return {"status": "ok"}
 
 async def _execute_search_query(
+    query: str,
+    site_norm: str,
+    time_range_value: Optional[str],
+    page: int,
+    limit: int,
+    language: Optional[str],
+    safesearch_value: Optional[str],
+    source: str,
+) -> WebResult:
+    if source == "ddgs":
+        return await _execute_search_query_ddgs(
+            query=query,
+            site_norm=site_norm,
+            time_range_value=time_range_value,
+            page=page,
+            limit=limit,
+            language=language,
+            safesearch_value=safesearch_value,
+        )
+    return await _execute_search_query_searxng(
+        query=query,
+        site_norm=site_norm,
+        time_range_value=time_range_value,
+        page=page,
+        limit=limit,
+        language=language,
+        safesearch_value=safesearch_value,
+    )
+
+
+async def _execute_search_query_searxng(
     query: str,
     site_norm: str,
     time_range_value: Optional[str],
@@ -446,7 +482,85 @@ async def _execute_search_query(
             items.append(WebItem(title=title, url=url_, snippet=snippet))
 
     next_page = page + 1 if len(results_raw) > limit else None
+    return _build_search_result(query, items, next_page)
 
+
+# --- DDGS search backend ---
+_DDGS_TIME_LIMIT = {"day": "d", "week": "w", "month": "m", "year": "y"}
+
+
+def _to_ddgs_region(language: Optional[str]) -> str:
+    """Zamapuj `language` (np. pl, en, pl-pl) na region ddgs ({cc}-{lang})."""
+    if not language:
+        return "us-en"
+    first = language.strip().lower().split(",")[0]
+    if "-" in first:
+        return first
+    if "_" in first:
+        return first.replace("_", "-")
+    return f"{first}-{first}"
+
+
+def _to_ddgs_safesearch(safesearch_value: Optional[str]) -> str:
+    if safesearch_value is None:
+        return "moderate"
+    return {"0": "off", "1": "moderate", "2": "on"}.get(safesearch_value, "moderate")
+
+
+async def _ddgs_search(
+    query: str,
+    *,
+    region: str,
+    safesearch: str,
+    timelimit: Optional[str],
+    limit: int,
+    page: int,
+) -> List[WebItem]:
+    def _run():
+        return DDGS().text(
+            query,
+            region=region,
+            safesearch=safesearch,
+            timelimit=timelimit,
+            max_results=limit,
+            page=page,
+        )
+
+    rows = await asyncio.to_thread(_run)
+    items: List[WebItem] = []
+    for hit in rows[:limit]:
+        title = (hit.get("title") or "")[:200]
+        url_ = hit.get("href") or hit.get("url") or ""
+        snippet = (hit.get("body") or hit.get("snippet") or hit.get("content") or "")[:500]
+        if url_:
+            items.append(WebItem(title=title, url=url_, snippet=snippet))
+    return items
+
+
+async def _execute_search_query_ddgs(
+    query: str,
+    site_norm: str,
+    time_range_value: Optional[str],
+    page: int,
+    limit: int,
+    language: Optional[str],
+    safesearch_value: Optional[str],
+) -> WebResult:
+    q_effective = f"site:{site_norm} {query}" if site_norm else query
+    items = await _ddgs_search(
+        q_effective,
+        region=_to_ddgs_region(language),
+        safesearch=_to_ddgs_safesearch(safesearch_value),
+        timelimit=_DDGS_TIME_LIMIT.get(time_range_value) if time_range_value else None,
+        limit=limit,
+        page=page,
+    )
+    # ddgs nie sygnalizuje istnienia kolejnych stron; zakładamy, że pełny limit = są dalej
+    next_page = page + 1 if len(items) >= limit else None
+    return _build_search_result(query, items, next_page)
+
+
+def _build_search_result(query: str, items: List[WebItem], next_page: Optional[int]) -> WebResult:
     hint = None
     if SEARCH_SHOW_HINTS:
         try:
@@ -494,10 +608,19 @@ async def search(
         description="Safe search level: 0|1|2 or off|moderate|strict",
         example="moderate",
     ),
+    source: Optional[str] = Query(
+        None,
+        description="Search backend: searxng|ddgs (default from env SEARCH_SOURCE)",
+        example="ddgs",
+    ),
     response: Response = None,
 ):
-    if client is None:
+    if client is None and (source or SEARCH_SOURCE).strip().lower() != "ddgs":
         raise HTTPException(503, "client not ready")
+
+    src = (source or SEARCH_SOURCE).strip().lower()
+    if src not in {"searxng", "ddgs"}:
+        raise HTTPException(422, "invalid source; allowed: searxng|ddgs")
 
     queries = _expand_query_values(q)
     if not queries:
@@ -520,6 +643,7 @@ async def search(
                 limit=limit,
                 language=language,
                 safesearch_value=safesearch_value,
+                source=src,
             )
             return single_query, result, None
         except HTTPException as he:
@@ -553,7 +677,7 @@ async def search(
     if response is not None:
         response.headers["X-Tool-Name"] = __title__
         response.headers["X-Tool-Version"] = __version__
-        response.headers["X-Tool-Source"] = "search"
+        response.headers["X-Tool-Source"] = src
         response.headers["X-Query-Count"] = str(len(queries))
 
     if len(queries) == 1:

@@ -3,6 +3,7 @@ services:
     build: .
     environment:
       - SEARXNG_URL=https://ai.p.lodz.pl/sx
+      - SEARCH_SOURCE=ddgs
       - TIMEOUT_S=3.0
       - MAX_CONN=200
       - MAX_KEEP=100

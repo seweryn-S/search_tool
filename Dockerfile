@@ -6,6 +6,6 @@ WORKDIR /app
 COPY app.py .
 RUN pip install --no-cache-dir \
     "fastapi>=0.110,<1.0" "uvicorn[standard]>=0.29,<1.0" \
-    "httpx[http2]>=0.27,<1.0" trafilatura readability-lxml markdownify brotli orjson
+    "httpx[http2]>=0.27,<1.0" trafilatura readability-lxml markdownify brotli orjson ddgs
 EXPOSE 7000
 CMD ["uvicorn","app:app","--host","0.0.0.0","--port","7000"]
